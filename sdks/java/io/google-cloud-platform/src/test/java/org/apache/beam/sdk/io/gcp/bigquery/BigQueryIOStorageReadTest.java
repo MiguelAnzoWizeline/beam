@@ -59,6 +59,7 @@ import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.*;
+import org.apache.arrow.vector.ipc.ReadChannel;
 import org.apache.arrow.vector.ipc.WriteChannel;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -656,15 +657,30 @@ public class BigQueryIOStorageReadTest {
   private ReadRowsResponse createResponseArrow(
       org.apache.arrow.vector.ipc.message.ArrowRecordBatch records,
       double progressAtResponseStart,
-      double progressAtResponseEnd) {
-    FlatBufferBuilder builder = new FlatBufferBuilder();
-    builder.finish(records.writeTo(builder));
-    ByteBuffer byteBuffer = builder.dataBuffer();
-    ArrowRecordBatch serializedRecord =
-        ArrowRecordBatch.newBuilder()
-            .setRowCount(records.getLength())
-            .setSerializedRecordBatch(ByteString.copyFrom(byteBuffer))
-            .build();
+      double progressAtResponseEnd) throws Exception {
+    ArrowRecordBatch serializedRecord;
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      MessageSerializer.serialize(new WriteChannel(Channels.newChannel(os)), records);
+      serializedRecord = ArrowRecordBatch.newBuilder()
+              .setRowCount(records.getLength())
+              .setSerializedRecordBatch(ByteString.copyFrom(os.toByteArray()))
+              .build();
+    } catch (IOException e) {
+      throw new RuntimeException("Error writing to byte array output stream", e);
+    }
+    org.apache.arrow.vector.types.pojo.Schema arrowSchema =
+            new org.apache.arrow.vector.types.pojo.Schema(
+                    asList(
+                            field("name", new ArrowType.Utf8()),
+                            field("float64", new ArrowType.Int(64, true))));
+    ReadChannel read = new ReadChannel(Channels.newChannel(serializedRecord.getSerializedRecordBatch().newInput()));
+    VectorSchemaRoot vectorRoot = VectorSchemaRoot.create(arrowSchema, allocator);
+    VectorLoader vectorLoader = new VectorLoader(vectorRoot);
+    vectorRoot.clear();
+    org.apache.arrow.vector.ipc.message.ArrowRecordBatch arrowMessage = MessageSerializer.deserializeRecordBatch(read, allocator);
+    vectorLoader.load(arrowMessage);
+    VarCharVector strVector = (VarCharVector) vectorRoot.getFieldVectors().get(0);
+    LOG.info("MiguelTest:"+strVector.getObject(0));
 
     return ReadRowsResponse.newBuilder()
         .setArrowRecordBatch(serializedRecord)
